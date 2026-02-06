@@ -1,0 +1,17 @@
+# OS
+.DS_Store
+
+# Dependencies
+node_modules/
+.next/
+dist/
+build/
+
+# Assets (S3で管理)
+*.mp4
+*.mov
+*.zip
+
+# Env
+.env.local
+.env.*.local
