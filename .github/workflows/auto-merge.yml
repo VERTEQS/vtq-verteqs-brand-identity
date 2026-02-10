@@ -1,0 +1,51 @@
+name: Auto Merge
+
+on:
+  workflow_run:
+    workflows: ["AI Code Review"]
+    types: [completed]
+
+jobs:
+  auto-merge:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Wait for all checks and merge
+        run: |
+          HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          REPO="${{ github.repository }}"
+
+          PR_NUMBER=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+            echo "No open PR found. Skipping."
+            exit 0
+          fi
+
+          echo "Found PR #$PR_NUMBER"
+
+          for i in $(seq 1 30); do
+            IN_PROGRESS=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --jq '[.check_runs[] | select(.status != "completed" and .name != "auto-merge")] | length')
+            if [ "$IN_PROGRESS" = "0" ]; then
+              break
+            fi
+            echo "Waiting for $IN_PROGRESS checks to complete... (attempt $i/30)"
+            sleep 10
+          done
+
+          FAILED_COUNT=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --jq '[.check_runs[] | select(.conclusion != "success" and .conclusion != "skipped" and .name != "auto-merge")] | length')
+
+          if [ "$FAILED_COUNT" != "0" ]; then
+            echo "Some checks failed:"
+            gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --jq '.check_runs[] | select(.conclusion != "success" and .conclusion != "skipped" and .name != "auto-merge") | "  \(.name): \(.conclusion)"'
+            exit 1
+          fi
+
+          echo "All checks passed! Merging PR #$PR_NUMBER..."
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
