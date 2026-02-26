@@ -10,35 +10,56 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      checks: read
     steps:
-      - name: Wait for checks and merge
-        run: |
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-          REPO="${{ github.repository }}"
+      - name: Wait for checks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.payload.pull_request.head.sha;
+            const maxAttempts = 30;
+            for (let i = 0; i < maxAttempts; i++) {
+              const { data: checks } = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: sha,
+              });
+              const others = checks.check_runs.filter(c => c.name !== 'auto-merge');
+              const pending = others.filter(c => c.status !== 'completed');
+              const failed = others.filter(c =>
+                c.status === 'completed' && c.conclusion !== 'success' && c.conclusion !== 'skipped'
+              );
+              if (failed.length > 0) {
+                core.setFailed(`Check failed: ${failed.map(c => c.name).join(', ')}`);
+                return;
+              }
+              if (pending.length === 0) {
+                core.info('All checks passed');
+                return;
+              }
+              core.info(`Waiting for: ${pending.map(c => c.name).join(', ')}`);
+              await new Promise(r => setTimeout(r, 10000));
+            }
+            core.setFailed('Timed out waiting for checks');
 
-          echo "PR #$PR_NUMBER (SHA: $HEAD_SHA)"
+      - name: Merge
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              merge_method: 'merge',
+            });
 
-          sleep 30
-
-          for i in $(seq 1 27); do
-            IN_PROGRESS=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --jq '[.check_runs[] | select(.status != "completed" and .name != "auto-merge")] | length')
-            if [ "$IN_PROGRESS" = "0" ]; then
-              break
-            fi
-            echo "Waiting for $IN_PROGRESS checks to complete... (attempt $i/27)"
-            sleep 10
-          done
-
-          FAILED_COUNT=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --jq '[.check_runs[] | select(.conclusion != "success" and .conclusion != "skipped" and .name != "auto-merge")] | length')
-
-          if [ "$FAILED_COUNT" != "0" ]; then
-            echo "Some checks failed:"
-            gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --jq '.check_runs[] | select(.conclusion != "success" and .conclusion != "skipped" and .name != "auto-merge") | "  \(.name): \(.conclusion)"'
-            exit 1
-          fi
-
-          echo "All checks passed! Merging PR #$PR_NUMBER..."
-          gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Delete branch
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            await github.rest.git.deleteRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `heads/${context.payload.pull_request.head.ref}`,
+            });
